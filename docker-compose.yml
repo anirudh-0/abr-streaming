@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"      # API port
+      - "9001:9001"      # Console port
+    volumes:
+      - minio_data:/data
+    environment:
+      MINIO_ROOT_USER: minio_access_key        # Must match minio.accessKey in properties
+      MINIO_ROOT_PASSWORD: minio_secret_key    # Must match minio.secretKey in properties
+      MINIO_BUCKET: storage-bucket        # Define default bucket
+    command: server --console-address ":9001" /data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    # Add initialization script to create bucket
+    entrypoint: >
+      /bin/sh -c "
+      mkdir -p /data/storage-bucket &&
+      /usr/bin/minio server --console-address ':9001' /data"
+
+volumes:
+  minio_data: 

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ABR Streaming POC</title>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+</head>
+<body>
+    <h1>ABR Streaming POC</h1>
+    <input type="file" id="fileInput" accept="video/*">
+    <button onclick="uploadVideo()">Upload</button>
+    <br><br>
+    <video id="video" controls></video>
+
+    <script>
+        function uploadVideo() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            if (!file) {
+                alert('Please select a file');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            fetch('/api/videos/upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.text())
+            .then(videoId => {
+                console.log('Video uploaded, ID:', videoId);
+                playVideo(videoId);
+            })
+            .catch(error => console.error('Error uploading video:', error));
+        }
+
+        function playVideo(videoId) {
+            const video = document.getElementById('video');
+            const videoSrc = `/api/videos/${videoId}/master.m3u8`;
+
+            if (Hls.isSupported()) {
+                const hls = new Hls();
+                hls.loadSource(videoSrc);
+                hls.attachMedia(video);
+                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                    video.play();
+                });
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = videoSrc;
+                video.addEventListener('loadedmetadata', function() {
+                    video.play();
+                });
+            }
+        }
+    </script>
+</body>
+</html>
+
