@@ -13,6 +13,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
@@ -21,6 +22,7 @@ import java.util.UUID;
 public class VideoService {
 
     private static final Logger logger = LoggerFactory.getLogger(VideoService.class);
+    private static final String OUTPUT_DIR = "output";
 
     @Autowired
     private MinioClient minioClient;
@@ -38,8 +40,11 @@ public class VideoService {
 
         logger.debug("Generated video ID: {}", videoId);
 
+        // Create output directory if it doesn't exist
+        Files.createDirectories(Paths.get(OUTPUT_DIR));
+        
         // Save original file
-        Path tempFile = Files.createTempFile(videoId, extension);
+        Path tempFile = Paths.get(OUTPUT_DIR, videoId + extension);
         file.transferTo(tempFile.toFile());
         logger.debug("Saved original file to temporary location: {}", tempFile);
 
@@ -73,8 +78,8 @@ public class VideoService {
         logger.info("Starting video processing for videoId: {}", videoId);
         for (String quality : QUALITIES) {
             logger.debug("Processing quality: {} for videoId: {}", quality, videoId);
-            String outputFilename = videoId + "_" + quality + ".mp4";
-            String hlsOutputPath = videoId + "/hls/" + quality;
+            String outputFilename = Paths.get(OUTPUT_DIR, videoId + "_" + quality + ".mp4").toString();
+            String hlsOutputPath = Paths.get(OUTPUT_DIR, videoId, "hls", quality).toString();
 
             // Transcode video
             transcodeVideo(inputFile.getAbsolutePath(), outputFilename, quality);
@@ -85,7 +90,7 @@ public class VideoService {
             logger.debug("Created HLS chunks for quality: {} for videoId: {}", quality, videoId);
 
             // Upload transcoded video and HLS chunks to Minio
-            uploadToMinio(new File(outputFilename), videoId + "/" + outputFilename);
+            uploadToMinio(new File(outputFilename), videoId + "/" + new File(outputFilename).getName());
             uploadHlsChunksToMinio(hlsOutputPath, videoId + "/hls/" + quality);
             logger.debug("Uploaded transcoded video and HLS chunks for quality: {} for videoId: {}", quality, videoId);
         }
@@ -131,7 +136,7 @@ public class VideoService {
         }
 
         try {
-            String masterPlaylistPath = videoId + "_master.m3u8";
+            String masterPlaylistPath = Paths.get(OUTPUT_DIR, videoId + "_master.m3u8").toString();
             logger.debug("Writing master playlist to file: {}", masterPlaylistPath);
             Files.write(Path.of(masterPlaylistPath), masterPlaylist.toString().getBytes());
             logger.debug("Uploading master playlist to Minio");
