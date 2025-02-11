@@ -104,6 +104,16 @@ public class VideoService {
     }
 
     private void createHlsChunks(String inputPath, String outputPath) {
+        // Create output directory if it doesn't exist
+        File outputDir = new File(outputPath);
+        if (!outputDir.exists()) {
+            logger.debug("Creating output directory: {}", outputPath);
+            if (!outputDir.mkdirs()) {
+                logger.error("Failed to create output directory: {}", outputPath);
+                throw new RuntimeException("Failed to create output directory: " + outputPath);
+            }
+        }
+
         // Use FFmpeg to create HLS chunks
         String command = String.format("ffmpeg -i %s -hls_time 10 -hls_list_size 0 %s/playlist.m3u8",
                 inputPath, outputPath);
