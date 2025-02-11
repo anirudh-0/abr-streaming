@@ -14,15 +14,29 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.util.Arrays;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.HashMap;
 
 @Service
 public class VideoService {
 
     private static final Logger logger = LoggerFactory.getLogger(VideoService.class);
     private static final String OUTPUT_DIR = "output";
+    private final Path outputPath;
+
+    public VideoService() {
+        try {
+            // Initialize output directory in current working directory
+            outputPath = Paths.get(System.getProperty("user.dir"), OUTPUT_DIR);
+            Files.createDirectories(outputPath);
+            logger.info("Created output directory at: {}", outputPath);
+        } catch (IOException e) {
+            logger.error("Failed to create output directory", e);
+            throw new RuntimeException("Failed to create output directory", e);
+        }
+    }
 
     @Autowired
     private MinioClient minioClient;
@@ -32,8 +46,25 @@ public class VideoService {
 
     private static final List<String> QUALITIES = Arrays.asList("144p", "240p", "480p", "720p", "1080p");
 
+    // Add timing data structures
+    private static class ProcessingTimes {
+        long transcodeTime;
+        long hlsTime;
+        long uploadTime;
+        
+        public long getTotal() {
+            return transcodeTime + hlsTime + uploadTime;
+        }
+    }
+    private Map<String, ProcessingTimes> qualityTimings = new HashMap<>();
+    private Instant processingStartTime;
+    private long totalProcessingTime;
+
     public String uploadAndProcess(MultipartFile file) throws IOException {
         logger.info("Starting upload and processing for file: {}", file.getOriginalFilename());
+        processingStartTime = Instant.now();
+        qualityTimings.clear();
+        
         String videoId = UUID.randomUUID().toString();
         String originalFilename = file.getOriginalFilename();
         String extension = originalFilename.substring(originalFilename.lastIndexOf("."));
@@ -41,10 +72,11 @@ public class VideoService {
         logger.debug("Generated video ID: {}", videoId);
 
         // Create output directory if it doesn't exist
-        Files.createDirectories(Paths.get(OUTPUT_DIR));
+        Files.createDirectories(outputPath);
         
         // Save original file
-        Path tempFile = Paths.get(OUTPUT_DIR, videoId + extension);
+        Path tempFile = outputPath.resolve(videoId + extension);
+        logger.debug("logging all variables: {} {} {} {} {} {}", videoId, extension, outputPath, tempFile.toString(), file, originalFilename);
         file.transferTo(tempFile.toFile());
         logger.debug("Saved original file to temporary location: {}", tempFile);
 
@@ -54,8 +86,14 @@ public class VideoService {
 
         // Process video
         processVideo(tempFile.toFile(), videoId);
+        
+        // Calculate total processing time
+        totalProcessingTime = Duration.between(processingStartTime, Instant.now()).toMillis();
+        
+        // Generate and log processing report
+        generateProcessingReport(videoId);
+        
         logger.info("Completed video processing for videoId: {}", videoId);
-
         return videoId;
     }
 
@@ -78,20 +116,28 @@ public class VideoService {
         logger.info("Starting video processing for videoId: {}", videoId);
         for (String quality : QUALITIES) {
             logger.debug("Processing quality: {} for videoId: {}", quality, videoId);
-            String outputFilename = Paths.get(OUTPUT_DIR, videoId + "_" + quality + ".mp4").toString();
-            String hlsOutputPath = Paths.get(OUTPUT_DIR, videoId, "hls", quality).toString();
+            qualityTimings.put(quality, new ProcessingTimes());
+            
+            String outputFilename = outputPath.resolve(videoId + "_" + quality + ".mp4").toString();
+            String hlsOutputPath = outputPath.resolve(Paths.get(videoId, "hls", quality)).toString();
 
-            // Transcode video
+            // Transcode video with timing
+            Instant transcodeStart = Instant.now();
             transcodeVideo(inputFile.getAbsolutePath(), outputFilename, quality);
+            qualityTimings.get(quality).transcodeTime = Duration.between(transcodeStart, Instant.now()).toMillis();
             logger.debug("Transcoded video to quality: {} for videoId: {}", quality, videoId);
 
-            // Create HLS chunks
+            // Create HLS chunks with timing
+            Instant hlsStart = Instant.now();
             createHlsChunks(outputFilename, hlsOutputPath);
+            qualityTimings.get(quality).hlsTime = Duration.between(hlsStart, Instant.now()).toMillis();
             logger.debug("Created HLS chunks for quality: {} for videoId: {}", quality, videoId);
 
-            // Upload transcoded video and HLS chunks to Minio
+            // Upload transcoded video and HLS chunks to Minio with timing
+            Instant uploadStart = Instant.now();
             uploadToMinio(new File(outputFilename), videoId + "/" + new File(outputFilename).getName());
             uploadHlsChunksToMinio(hlsOutputPath, videoId + "/hls/" + quality);
+            qualityTimings.get(quality).uploadTime = Duration.between(uploadStart, Instant.now()).toMillis();
             logger.debug("Uploaded transcoded video and HLS chunks for quality: {} for videoId: {}", quality, videoId);
         }
 
@@ -136,7 +182,7 @@ public class VideoService {
         }
 
         try {
-            String masterPlaylistPath = Paths.get(OUTPUT_DIR, videoId + "_master.m3u8").toString();
+            String masterPlaylistPath = outputPath.resolve(videoId + "_master.m3u8").toString();
             logger.debug("Writing master playlist to file: {}", masterPlaylistPath);
             Files.write(Path.of(masterPlaylistPath), masterPlaylist.toString().getBytes());
             logger.debug("Uploading master playlist to Minio");
@@ -219,6 +265,52 @@ public class VideoService {
             case "1080p": return "1920x1080";
             default: throw new IllegalArgumentException("Invalid quality: " + quality);
         }
+    }
+
+    private void generateProcessingReport(String videoId) {
+        StringBuilder report = new StringBuilder();
+        report.append("\n=== Video Processing Report ===\n");
+        report.append("Video ID: ").append(videoId).append("\n");
+        report.append("Total Processing Time: ").append(formatDuration(totalProcessingTime)).append("\n\n");
+        report.append("Quality-wise Breakdown:\n");
+        report.append(String.format("%-10s %-15s %-15s %-15s %-15s\n", 
+                     "Quality", "Transcode", "HLS", "Upload", "Total"));
+        report.append("----------------------------------------------------------\n");
+
+        long totalTranscode = 0;
+        long totalHls = 0;
+        long totalUpload = 0;
+
+        for (String quality : QUALITIES) {
+            ProcessingTimes times = qualityTimings.get(quality);
+            if (times != null) {
+                report.append(String.format("%-10s %-15s %-15s %-15s %-15s\n",
+                    quality,
+                    formatDuration(times.transcodeTime),
+                    formatDuration(times.hlsTime),
+                    formatDuration(times.uploadTime),
+                    formatDuration(times.getTotal())
+                ));
+                totalTranscode += times.transcodeTime;
+                totalHls += times.hlsTime;
+                totalUpload += times.uploadTime;
+            }
+        }
+
+        report.append("\nTotals by Process Type:\n");
+        report.append(String.format("Transcoding: %s\n", formatDuration(totalTranscode)));
+        report.append(String.format("HLS Creation: %s\n", formatDuration(totalHls)));
+        report.append(String.format("Uploading: %s\n", formatDuration(totalUpload)));
+        report.append(String.format("Total Processing Time: %s\n", formatDuration(totalProcessingTime)));
+
+        logger.info(report.toString());
+    }
+
+    private String formatDuration(long milliseconds) {
+        long seconds = milliseconds / 1000;
+        long minutes = seconds / 60;
+        seconds = seconds % 60;
+        return String.format("%02d:%02d.%03d", minutes, seconds, milliseconds % 1000);
     }
 }
 
