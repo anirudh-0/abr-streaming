@@ -87,5 +87,46 @@ public class VideoController {
             return ResponseEntity.notFound().build();
         }
     }
+
+    @GetMapping("/{videoId}/original/playlist.m3u8")
+    public ResponseEntity<InputStreamResource> getOriginalPlaylist(@PathVariable String videoId) {
+        logger.debug("Fetching original quality playlist for videoId: {}", videoId);
+        try {
+            InputStream stream = minioClient.getObject(GetObjectArgs.builder()
+                    .bucket(bucket)
+                    .object(videoId + "/hls/original/playlist.m3u8")
+                    .build());
+            logger.debug("Successfully retrieved original quality playlist for videoId: {}", videoId);
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType("application/vnd.apple.mpegurl"))
+                    .body(new InputStreamResource(stream));
+        } catch (Exception e) {
+            logger.error("Failed to retrieve original quality playlist for videoId: {}. Error: {}", 
+                videoId, e.getMessage(), e);
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    @GetMapping("/{videoId}/original/{filename}")
+    public ResponseEntity<InputStreamResource> getOriginalSegment(
+            @PathVariable String videoId,
+            @PathVariable String filename) {
+        logger.debug("Fetching original quality segment - videoId: {}, filename: {}", videoId, filename);
+        try {
+            InputStream stream = minioClient.getObject(GetObjectArgs.builder()
+                    .bucket(bucket)
+                    .object(videoId + "/hls/original/" + filename)
+                    .build());
+            logger.debug("Successfully retrieved original quality segment - videoId: {}, filename: {}", 
+                videoId, filename);
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType("video/MP2T"))
+                    .body(new InputStreamResource(stream));
+        } catch (Exception e) {
+            logger.error("Failed to retrieve original quality segment - videoId: {}, filename: {}. Error: {}", 
+                videoId, filename, e.getMessage(), e);
+            return ResponseEntity.notFound().build();
+        }
+    }
 }
 
