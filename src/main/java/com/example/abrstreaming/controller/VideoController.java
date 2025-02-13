@@ -6,6 +6,7 @@ import io.minio.MinioClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -26,7 +27,8 @@ public class VideoController {
     @Autowired
     private MinioClient minioClient;
 
-    private static final String BUCKET_NAME = "videos";
+    @Value("${minio.bucket}")
+    private String bucket;
 
     @PostMapping("/upload")
     public ResponseEntity<String> uploadVideo(@RequestParam("file") MultipartFile file) {
@@ -48,7 +50,7 @@ public class VideoController {
         logger.debug("Fetching master playlist for videoId: {}", videoId);
         try {
             InputStream stream = minioClient.getObject(GetObjectArgs.builder()
-                    .bucket(BUCKET_NAME)
+                    .bucket(bucket)
                     .object(videoId + "/master.m3u8")
                     .build());
             logger.debug("Successfully retrieved master playlist for videoId: {}", videoId);
@@ -71,7 +73,7 @@ public class VideoController {
             videoId, quality, filename);
         try {
             InputStream stream = minioClient.getObject(GetObjectArgs.builder()
-                    .bucket(BUCKET_NAME)
+                    .bucket(bucket)
                     .object(videoId + "/hls/" + quality + "/" + filename)
                     .build());
             logger.debug("Successfully retrieved HLS chunk - videoId: {}, quality: {}, filename: {}", 
