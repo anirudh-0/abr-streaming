@@ -44,7 +44,8 @@ public class VideoService {
     @Value("${minio.bucket}")
     private String bucket;
 
-    private static final List<String> QUALITIES = Arrays.asList("144p", "240p", "480p", "720p", "1080p");
+    // private static final List<String> QUALITIES = Arrays.asList("144p", "240p", "480p", "720p", "1080p");
+    private static final List<String> QUALITIES = Arrays.asList("240p", "480p", "720p");
 
     // Add timing data structures
     private static class ProcessingTimes {
@@ -147,9 +148,8 @@ public class VideoService {
     }
 
     private void transcodeVideo(String inputPath, String outputPath, String quality) {
-        // Use FFmpeg to transcode video
-        // This is a simplified example, you may need to adjust parameters based on your requirements
-        String command = String.format("ffmpeg -i %s -vf scale=%s -c:a aac -b:a 128k %s",
+        // Use FFmpeg to transcode video with optimization flags
+        String command = String.format("ffmpeg -i %s -vf scale=%s -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 64k %s",
                 inputPath, getScaleForQuality(quality), outputPath);
         executeCommand(command);
     }
