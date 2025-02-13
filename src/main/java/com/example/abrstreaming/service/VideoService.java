@@ -18,6 +18,8 @@ import java.util.*;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 
 @Service
 public class VideoService {
@@ -43,9 +45,6 @@ public class VideoService {
 
     @Value("${minio.bucket}")
     private String bucket;
-
-    // private static final List<String> QUALITIES = Arrays.asList("144p", "240p", "480p", "720p", "1080p");
-    private static final List<String> QUALITIES = Arrays.asList("240p", "480p", "720p");
 
     // Add timing data structures
     private static class ProcessingTimes {
@@ -85,8 +84,8 @@ public class VideoService {
         uploadToMinio(tempFile.toFile(), videoId + "/original" + extension);
         logger.info("Uploaded original file to Minio");
 
-        // Process video
-        processVideo(tempFile.toFile(), videoId);
+        // Process video with dynamic qualities
+        processVideo(tempFile.toFile(), videoId, extension);
         
         // Calculate total processing time
         totalProcessingTime = Duration.between(processingStartTime, Instant.now()).toMillis();
@@ -113,43 +112,58 @@ public class VideoService {
         }
     }
 
-    private void processVideo(File inputFile, String videoId) {
+    private void processVideo(File inputFile, String videoId, String extension) {
         logger.info("Starting video processing for videoId: {}", videoId);
-        for (String quality : QUALITIES) {
+        
+        // Get applicable qualities based on input video
+        List<String> qualities = getApplicableQualities(inputFile.getAbsolutePath());
+        
+        for (String quality : qualities) {
             logger.debug("Processing quality: {} for videoId: {}", quality, videoId);
             qualityTimings.put(quality, new ProcessingTimes());
             
+            if (quality.equals("original")) {
+                // Skip transcoding for original quality
+                String hlsOutputPath = outputPath.resolve(Paths.get(videoId, "hls", quality)).toString();
+                
+                // Create HLS chunks directly from original
+                Instant hlsStart = Instant.now();
+                createHlsChunks(inputFile.getAbsolutePath(), hlsOutputPath);
+                qualityTimings.get(quality).hlsTime = Duration.between(hlsStart, Instant.now()).toMillis();
+                
+                // Upload HLS chunks
+                Instant uploadStart = Instant.now();
+                uploadHlsChunksToMinio(hlsOutputPath, videoId + "/hls/" + quality);
+                qualityTimings.get(quality).uploadTime = Duration.between(uploadStart, Instant.now()).toMillis();
+                
+                continue;
+            }
+
             String outputFilename = outputPath.resolve(videoId + "_" + quality + ".mp4").toString();
             String hlsOutputPath = outputPath.resolve(Paths.get(videoId, "hls", quality)).toString();
 
-            // Transcode video with timing
+            // Rest of the existing processing logic
             Instant transcodeStart = Instant.now();
             transcodeVideo(inputFile.getAbsolutePath(), outputFilename, quality);
             qualityTimings.get(quality).transcodeTime = Duration.between(transcodeStart, Instant.now()).toMillis();
-            logger.debug("Transcoded video to quality: {} for videoId: {}", quality, videoId);
 
-            // Create HLS chunks with timing
             Instant hlsStart = Instant.now();
             createHlsChunks(outputFilename, hlsOutputPath);
             qualityTimings.get(quality).hlsTime = Duration.between(hlsStart, Instant.now()).toMillis();
-            logger.debug("Created HLS chunks for quality: {} for videoId: {}", quality, videoId);
 
-            // Upload transcoded video and HLS chunks to Minio with timing
             Instant uploadStart = Instant.now();
             uploadToMinio(new File(outputFilename), videoId + "/" + new File(outputFilename).getName());
             uploadHlsChunksToMinio(hlsOutputPath, videoId + "/hls/" + quality);
             qualityTimings.get(quality).uploadTime = Duration.between(uploadStart, Instant.now()).toMillis();
-            logger.debug("Uploaded transcoded video and HLS chunks for quality: {} for videoId: {}", quality, videoId);
         }
 
-        // Create master playlist
-        createMasterPlaylist(videoId);
-        logger.info("Completed video processing for videoId: {}", videoId);
+        // Create master playlist with all qualities including original
+        createMasterPlaylist(videoId, qualities);
     }
 
     private void transcodeVideo(String inputPath, String outputPath, String quality) {
         // Use FFmpeg to transcode video with optimization flags
-        String command = String.format("ffmpeg -i %s -vf scale=%s -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 64k %s",
+        String command = String.format("ffmpeg -i %s -vf scale=%s -c:v libx264 -preset ultrafast -crf 35 -c:a copy %s",
                 inputPath, getScaleForQuality(quality), outputPath);
         executeCommand(command);
     }
@@ -171,25 +185,37 @@ public class VideoService {
         executeCommand(command);
     }
 
-    private void createMasterPlaylist(String videoId) {
+    private void createMasterPlaylist(String videoId, List<String> qualities) {
         logger.info("Creating master playlist for videoId: {}", videoId);
         StringBuilder masterPlaylist = new StringBuilder("#EXTM3U\n");
-        for (String quality : QUALITIES) {
+        
+        for (String quality : qualities) {
             logger.debug("Adding quality {} to master playlist", quality);
-            masterPlaylist.append(String.format("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s\n",
-                    getBandwidthForQuality(quality), getResolutionForQuality(quality)));
+            if (quality.equals("original")) {
+                // For original quality, we'll need to get its actual resolution and bandwidth
+                String[] dimensions = getVideoDimensions(outputPath.resolve(videoId + "/hls/original/playlist.m3u8").toString());
+                if (dimensions != null) {
+                    int width = Integer.parseInt(dimensions[0]);
+                    int height = Integer.parseInt(dimensions[1]);
+                    masterPlaylist.append(String.format("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%dx%d\n",
+                            getBandwidthForResolution(width, height), width, height));
+                } else {
+                    // Fallback if we can't get dimensions
+                    masterPlaylist.append("#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=1920x1080\n");
+                }
+            } else {
+                masterPlaylist.append(String.format("#EXT-X-STREAM-INF:BANDWIDTH=%d,RESOLUTION=%s\n",
+                        getBandwidthForQuality(quality), getResolutionForQuality(quality)));
+            }
             masterPlaylist.append(quality + "/playlist.m3u8\n");
         }
 
         try {
             String masterPlaylistPath = outputPath.resolve(videoId + "_master.m3u8").toString();
-            logger.debug("Writing master playlist to file: {}", masterPlaylistPath);
             Files.write(Path.of(masterPlaylistPath), masterPlaylist.toString().getBytes());
-            logger.debug("Uploading master playlist to Minio");
             uploadToMinio(new File(masterPlaylistPath), videoId + "/master.m3u8");
-            logger.info("Successfully created and uploaded master playlist for videoId: {}", videoId);
         } catch (IOException e) {
-            logger.error("Error creating master playlist for videoId: {}. Error: {}", videoId, e.getMessage(), e);
+            logger.error("Error creating master playlist", e);
             throw new RuntimeException("Error creating master playlist", e);
         }
     }
@@ -281,7 +307,7 @@ public class VideoService {
         long totalHls = 0;
         long totalUpload = 0;
 
-        for (String quality : QUALITIES) {
+        for (String quality : qualityTimings.keySet()) {
             ProcessingTimes times = qualityTimings.get(quality);
             if (times != null) {
                 report.append(String.format("%-10s %-15s %-15s %-15s %-15s\n",
@@ -311,6 +337,62 @@ public class VideoService {
         long minutes = seconds / 60;
         seconds = seconds % 60;
         return String.format("%02d:%02d.%03d", minutes, seconds, milliseconds % 1000);
+    }
+
+    // Remove static QUALITIES list as we'll generate it dynamically
+    private List<String> getApplicableQualities(String inputPath) {
+        // Get input video dimensions
+        String[] dimensions = getVideoDimensions(inputPath);
+        if (dimensions == null) {
+            logger.error("Could not determine input video dimensions");
+            return Arrays.asList("240p", "480p"); // fallback to safe defaults
+        }
+
+        int width = Integer.parseInt(dimensions[0]);
+        int height = Integer.parseInt(dimensions[1]);
+        List<String> applicableQualities = new ArrayList<>();
+
+        // Add original quality first
+        applicableQualities.add("original");
+
+        // Add lower qualities based on input resolution
+        if (height > 720) applicableQualities.add("720p");
+        if (height > 480) applicableQualities.add("480p");
+        if (height > 240) applicableQualities.add("240p");
+
+        logger.info("Determined applicable qualities for input video ({}x{}): {}", width, height, applicableQualities);
+        return applicableQualities;
+    }
+
+    private String[] getVideoDimensions(String videoPath) {
+        try {
+            Process process = Runtime.getRuntime().exec(String.format(
+                "ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 %s",
+                videoPath
+            ));
+            
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            String dimensions = reader.readLine();
+            process.waitFor();
+            
+            if (dimensions != null && !dimensions.isEmpty()) {
+                return dimensions.split("x");
+            }
+        } catch (Exception e) {
+            logger.error("Error getting video dimensions", e);
+        }
+        return null;
+    }
+
+    private int getBandwidthForResolution(int width, int height) {
+        // Estimate bandwidth based on resolution
+        int pixels = width * height;
+        if (pixels <= 256 * 144) return 300000;
+        if (pixels <= 426 * 240) return 700000;
+        if (pixels <= 854 * 480) return 1500000;
+        if (pixels <= 1280 * 720) return 3000000;
+        if (pixels <= 1920 * 1080) return 6000000;
+        return 8000000; // for higher resolutions
     }
 }
 
